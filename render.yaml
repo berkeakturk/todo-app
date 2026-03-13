@@ -1,0 +1,19 @@
+databases:
+  - name: todo-db
+    plan: free
+    databaseName: todoapp
+
+services:
+  - type: web
+    name: todo-board
+    plan: free
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: todo-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
