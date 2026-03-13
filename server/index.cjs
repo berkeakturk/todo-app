@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 const path = require('path');
 const crypto = require('crypto');
 const cron = require('node-cron');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -187,16 +187,6 @@ function rowToTask(row) {
 
 // ─── Daily Deadline Email Job ───
 
-function createMailTransporter() {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD,
-    },
-  });
-}
-
 function formatTimeLeft(deadline) {
   const now = new Date();
   const dl = new Date(deadline);
@@ -227,19 +217,18 @@ function buildBoardSection(boardName, tasks) {
 }
 
 async function sendDeadlineEmails() {
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.log('[cron] Skipping email job — GMAIL_USER or GMAIL_APP_PASSWORD not set');
+  if (!process.env.RESEND_API_KEY) {
+    console.log('[cron] Skipping email job — RESEND_API_KEY not set');
     return;
   }
 
   console.log('[cron] Running daily deadline check...');
-  const transporter = createMailTransporter();
+  const resend = new Resend(process.env.RESEND_API_KEY);
 
   try {
     const { rows: users } = await pool.query('SELECT id, name, email FROM users');
 
     for (const user of users) {
-      // Get backlog/wip tasks with deadlines within 7 days (or overdue) for both boards
       const { rows: allTasks } = await pool.query(
         `SELECT * FROM tasks
          WHERE user_id = $1
@@ -253,19 +242,9 @@ async function sendDeadlineEmails() {
       const personalTasks = allTasks.filter(t => t.board === 'personal');
       const workTasks = allTasks.filter(t => t.board === 'work');
 
-      // Check if boards have ANY backlog/wip tasks at all
-      const { rows: allBoardTasks } = await pool.query(
-        `SELECT DISTINCT board FROM tasks WHERE user_id = $1 AND status IN ('backlog', 'wip')`,
-        [user.id]
-      );
-      const hasPersonalTasks = allBoardTasks.some(t => t.board === 'personal');
-      const hasWorkTasks = allBoardTasks.some(t => t.board === 'work');
-
-      // Build sections: show urgent tasks if any, or "all clear" / "empty" message
       const personalSection = buildBoardSection('personal', personalTasks);
       const workSection = buildBoardSection('work', workTasks);
 
-      // Always show both boards — empty boards get the "all clear" message
       const urgentCount = allTasks.length;
       const subject = urgentCount > 0
         ? `📋 ${urgentCount} task${urgentCount > 1 ? 's' : ''} approaching deadline — Todo Board`
@@ -282,14 +261,19 @@ async function sendDeadlineEmails() {
         </div>
       `;
 
-      await transporter.sendMail({
-        from: `"Todo Board" <${process.env.GMAIL_USER}>`,
-        to: user.email,
+      const fromAddress = process.env.RESEND_FROM_EMAIL || 'Todo Board <onboarding@resend.dev>';
+      const { error } = await resend.emails.send({
+        from: fromAddress,
+        to: [user.email],
         subject,
         html,
       });
 
-      console.log(`[cron] Email sent to ${user.email} (${urgentCount} urgent tasks)`);
+      if (error) {
+        console.error(`[cron] Failed to send to ${user.email}:`, error);
+      } else {
+        console.log(`[cron] Email sent to ${user.email} (${urgentCount} urgent tasks)`);
+      }
     }
 
     console.log('[cron] Deadline email job completed.');
