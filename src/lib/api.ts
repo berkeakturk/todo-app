@@ -91,3 +91,12 @@ export async function deleteTaskApi(id: string): Promise<void> {
 export async function moveTaskApi(id: string, status: Status): Promise<Task> {
   return updateTask(id, { status });
 }
+
+export async function sendReport(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_URL}/test-email`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to send report' }));
+    throw new Error(err.error);
+  }
+  return res.json();
+}

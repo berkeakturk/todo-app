@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Task, Status, Board, User } from '@/types';
-import { fetchTasks, createTask, updateTask, deleteTaskApi, moveTaskApi, getMe, logout } from '@/lib/api';
+import { fetchTasks, createTask, updateTask, deleteTaskApi, moveTaskApi, getMe, logout, sendReport } from '@/lib/api';
 import { TaskForm } from '@/components/task-form';
 import { Column } from '@/components/column';
 import { AuthPage } from '@/components/auth-page';
 import { Button } from '@/components/ui/button';
-import { Plus, ClipboardList, Moon, Sun, User as UserIcon, Briefcase, LogOut } from 'lucide-react';
+import { Plus, ClipboardList, Moon, Sun, User as UserIcon, Briefcase, LogOut, Mail } from 'lucide-react';
 import { useTheme } from '@/hooks/use-theme';
 
 function App() {
@@ -15,6 +15,7 @@ function App() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [activeBoard, setActiveBoard] = useState<Board>('personal');
+  const [sendingReport, setSendingReport] = useState(false);
   const { theme, toggle: toggleTheme } = useTheme();
 
   // Check for existing session on mount
@@ -39,6 +40,18 @@ function App() {
     setTasks([]);
     setShowForm(false);
     setEditingTask(null);
+  };
+
+  const handleSendReport = async () => {
+    setSendingReport(true);
+    try {
+      await sendReport();
+      alert('Report email sent! Check your inbox.');
+    } catch (e: unknown) {
+      alert('Failed to send report: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    } finally {
+      setSendingReport(false);
+    }
   };
 
   const addOrUpdateTask = async (data: Omit<Task, 'id' | 'createdAt' | 'board'>) => {
@@ -131,6 +144,9 @@ function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground hidden sm:inline">Hi, {user.name}</span>
+            <Button variant="outline" size="icon" onClick={handleSendReport} disabled={sendingReport} aria-label="Send email report" title="Send deadline report to your email">
+              <Mail className={`h-4 w-4 ${sendingReport ? 'animate-pulse' : ''}`} />
+            </Button>
             <Button variant="outline" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>

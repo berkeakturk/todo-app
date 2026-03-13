@@ -245,7 +245,7 @@ async function sendDeadlineEmails() {
          WHERE user_id = $1
            AND status IN ('backlog', 'wip')
            AND deadline IS NOT NULL
-           AND deadline::timestamptz < NOW() + INTERVAL '7 days'
+           AND deadline::date <= (CURRENT_DATE + INTERVAL '7 days')
          ORDER BY deadline ASC`,
         [user.id]
       );
@@ -253,35 +253,19 @@ async function sendDeadlineEmails() {
       const personalTasks = allTasks.filter(t => t.board === 'personal');
       const workTasks = allTasks.filter(t => t.board === 'work');
 
-      // Get tasks with no deadline in backlog/wip for empty-board check
+      // Check if boards have ANY backlog/wip tasks at all
       const { rows: allBoardTasks } = await pool.query(
-        `SELECT board FROM tasks WHERE user_id = $1 AND status IN ('backlog', 'wip')`,
+        `SELECT DISTINCT board FROM tasks WHERE user_id = $1 AND status IN ('backlog', 'wip')`,
         [user.id]
       );
       const hasPersonalTasks = allBoardTasks.some(t => t.board === 'personal');
       const hasWorkTasks = allBoardTasks.some(t => t.board === 'work');
 
-      // Skip user if no urgent tasks and both boards have tasks (nothing to report)
-      if (personalTasks.length === 0 && workTasks.length === 0 && hasPersonalTasks && hasWorkTasks) {
-        continue;
-      }
+      // Build sections: show urgent tasks if any, or "all clear" / "empty" message
+      const personalSection = buildBoardSection('personal', personalTasks);
+      const workSection = buildBoardSection('work', workTasks);
 
-      const personalSection = buildBoardSection('personal',
-        personalTasks.length > 0 ? personalTasks : (hasPersonalTasks ? [] : [])
-      );
-      const workSection = buildBoardSection('work',
-        workTasks.length > 0 ? workTasks : (hasWorkTasks ? [] : [])
-      );
-
-      // Build empty board notices
-      let emptyNotices = '';
-      if (!hasPersonalTasks) {
-        emptyNotices += buildBoardSection('personal', []);
-      }
-      if (!hasWorkTasks) {
-        emptyNotices += buildBoardSection('work', []);
-      }
-
+      // Always show both boards — empty boards get the "all clear" message
       const urgentCount = allTasks.length;
       const subject = urgentCount > 0
         ? `📋 ${urgentCount} task${urgentCount > 1 ? 's' : ''} approaching deadline — Todo Board`
@@ -291,8 +275,8 @@ async function sendDeadlineEmails() {
         <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
           <h1 style="color:#1e293b;border-bottom:2px solid #6366f1;padding-bottom:10px;">Good morning, ${user.name}! ☀️</h1>
           <p style="color:#64748b;">Here's your daily task summary for tasks in <strong>Backlog</strong> and <strong>WIP</strong> with deadlines within the next 7 days.</p>
-          ${personalTasks.length > 0 ? buildBoardSection('personal', personalTasks) : (!hasPersonalTasks ? buildBoardSection('personal', []) : '')}
-          ${workTasks.length > 0 ? buildBoardSection('work', workTasks) : (!hasWorkTasks ? buildBoardSection('work', []) : '')}
+          ${personalSection}
+          ${workSection}
           <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
           <p style="color:#94a3b8;font-size:12px;">This is an automated email from your Todo Board app.</p>
         </div>
@@ -322,7 +306,7 @@ app.post('/api/test-email', auth, async (req, res) => {
   try {
     await sendDeadlineEmails();
     res.json({ success: true, message: 'Deadline emails sent' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[test-email] Error:', e); res.status(500).json({ error: e.message }); }
 });
 
 // SPA fallback — serve index.html for all non-API routes
