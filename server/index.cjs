@@ -3,6 +3,8 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const path = require('path');
 const crypto = require('crypto');
+const cron = require('node-cron');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -182,6 +184,146 @@ function rowToTask(row) {
     createdAt: row.created_at,
   };
 }
+
+// ─── Daily Deadline Email Job ───
+
+function createMailTransporter() {
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD,
+    },
+  });
+}
+
+function formatTimeLeft(deadline) {
+  const now = new Date();
+  const dl = new Date(deadline);
+  const diff = dl - now;
+  if (diff <= 0) return '⚠️ OVERDUE';
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  if (days > 0) return `${days}d ${hours}h left`;
+  return `${hours}h left`;
+}
+
+function buildBoardSection(boardName, tasks) {
+  const label = boardName === 'personal' ? '🏠 Personal Tasks' : '💼 Work Tasks';
+  if (tasks.length === 0) {
+    return `<h2 style="color:#6366f1;">${label}</h2><p style="color:#888;">No tasks in Backlog or WIP — you're all clear! ✅</p>`;
+  }
+  let html = `<h2 style="color:#6366f1;">${label}</h2>`;
+  html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">';
+  html += '<tr style="background:#f1f5f9;"><th style="padding:8px;text-align:left;border:1px solid #e2e8f0;">Task</th><th style="padding:8px;text-align:left;border:1px solid #e2e8f0;">Status</th><th style="padding:8px;text-align:left;border:1px solid #e2e8f0;">Deadline</th><th style="padding:8px;text-align:left;border:1px solid #e2e8f0;">Time Left</th></tr>';
+  for (const t of tasks) {
+    const timeLeft = formatTimeLeft(t.deadline);
+    const isOverdue = timeLeft.includes('OVERDUE');
+    const color = isOverdue ? '#ef4444' : '#f59e0b';
+    html += `<tr><td style="padding:8px;border:1px solid #e2e8f0;">${t.title}</td><td style="padding:8px;border:1px solid #e2e8f0;">${t.status.toUpperCase()}</td><td style="padding:8px;border:1px solid #e2e8f0;">${new Date(t.deadline).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</td><td style="padding:8px;border:1px solid #e2e8f0;color:${color};font-weight:bold;">${timeLeft}</td></tr>`;
+  }
+  html += '</table>';
+  return html;
+}
+
+async function sendDeadlineEmails() {
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.log('[cron] Skipping email job — GMAIL_USER or GMAIL_APP_PASSWORD not set');
+    return;
+  }
+
+  console.log('[cron] Running daily deadline check...');
+  const transporter = createMailTransporter();
+
+  try {
+    const { rows: users } = await pool.query('SELECT id, name, email FROM users');
+
+    for (const user of users) {
+      // Get backlog/wip tasks with deadlines within 7 days (or overdue) for both boards
+      const { rows: allTasks } = await pool.query(
+        `SELECT * FROM tasks
+         WHERE user_id = $1
+           AND status IN ('backlog', 'wip')
+           AND deadline IS NOT NULL
+           AND deadline::timestamptz < NOW() + INTERVAL '7 days'
+         ORDER BY deadline ASC`,
+        [user.id]
+      );
+
+      const personalTasks = allTasks.filter(t => t.board === 'personal');
+      const workTasks = allTasks.filter(t => t.board === 'work');
+
+      // Get tasks with no deadline in backlog/wip for empty-board check
+      const { rows: allBoardTasks } = await pool.query(
+        `SELECT board FROM tasks WHERE user_id = $1 AND status IN ('backlog', 'wip')`,
+        [user.id]
+      );
+      const hasPersonalTasks = allBoardTasks.some(t => t.board === 'personal');
+      const hasWorkTasks = allBoardTasks.some(t => t.board === 'work');
+
+      // Skip user if no urgent tasks and both boards have tasks (nothing to report)
+      if (personalTasks.length === 0 && workTasks.length === 0 && hasPersonalTasks && hasWorkTasks) {
+        continue;
+      }
+
+      const personalSection = buildBoardSection('personal',
+        personalTasks.length > 0 ? personalTasks : (hasPersonalTasks ? [] : [])
+      );
+      const workSection = buildBoardSection('work',
+        workTasks.length > 0 ? workTasks : (hasWorkTasks ? [] : [])
+      );
+
+      // Build empty board notices
+      let emptyNotices = '';
+      if (!hasPersonalTasks) {
+        emptyNotices += buildBoardSection('personal', []);
+      }
+      if (!hasWorkTasks) {
+        emptyNotices += buildBoardSection('work', []);
+      }
+
+      const urgentCount = allTasks.length;
+      const subject = urgentCount > 0
+        ? `📋 ${urgentCount} task${urgentCount > 1 ? 's' : ''} approaching deadline — Todo Board`
+        : '📋 Daily Todo Board Summary';
+
+      const html = `
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+          <h1 style="color:#1e293b;border-bottom:2px solid #6366f1;padding-bottom:10px;">Good morning, ${user.name}! ☀️</h1>
+          <p style="color:#64748b;">Here's your daily task summary for tasks in <strong>Backlog</strong> and <strong>WIP</strong> with deadlines within the next 7 days.</p>
+          ${personalTasks.length > 0 ? buildBoardSection('personal', personalTasks) : (!hasPersonalTasks ? buildBoardSection('personal', []) : '')}
+          ${workTasks.length > 0 ? buildBoardSection('work', workTasks) : (!hasWorkTasks ? buildBoardSection('work', []) : '')}
+          <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
+          <p style="color:#94a3b8;font-size:12px;">This is an automated email from your Todo Board app.</p>
+        </div>
+      `;
+
+      await transporter.sendMail({
+        from: `"Todo Board" <${process.env.GMAIL_USER}>`,
+        to: user.email,
+        subject,
+        html,
+      });
+
+      console.log(`[cron] Email sent to ${user.email} (${urgentCount} urgent tasks)`);
+    }
+
+    console.log('[cron] Deadline email job completed.');
+  } catch (err) {
+    console.error('[cron] Email job failed:', err);
+  }
+}
+
+// Schedule: 8:00 AM CET = 7:00 AM UTC → "0 7 * * *"
+cron.schedule('0 7 * * *', sendDeadlineEmails, { timezone: 'Europe/Berlin' });
+
+// Manual trigger for testing (protected, requires auth)
+app.post('/api/test-email', auth, async (req, res) => {
+  try {
+    await sendDeadlineEmails();
+    res.json({ success: true, message: 'Deadline emails sent' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // SPA fallback — serve index.html for all non-API routes
 app.get('/{*splat}', (_req, res) => {
